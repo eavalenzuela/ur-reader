@@ -99,4 +99,4 @@ decisions, and known v1 simplifications.
 
 ## License
 
-Not yet specified.
+[MIT](LICENSE).
