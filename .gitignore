@@ -1,0 +1,9 @@
+# Build output
+build/
+
+# Generated test render artifacts (produced by the GUI smoke tests)
+test_data/_*.png
+
+# Editor / Qt cruft
+*.user
+*.autosave
