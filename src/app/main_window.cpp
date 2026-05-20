@@ -9,7 +9,6 @@
 #include <QLabel>
 #include <QMenu>
 #include <QSignalBlocker>
-#include <QSlider>
 #include <QStackedWidget>
 #include <QTimer>
 #include <QToolBar>
@@ -18,7 +17,10 @@
 
 #include "archive/comic_archive.h"
 #include "app/chrome_controller.h"
+#include "app/hover_scrubber.h"
+#include "app/scrubber_preview.h"
 #include "decode/decode_service.h"
+#include "decode/thumbnail_service.h"
 #include "model/book.h"
 #include "session/progress_file.h"
 #include "view/paged_view.h"
@@ -29,9 +31,10 @@ namespace ur {
 struct MainWindow::Impl {
     // Declared in dependency order so destruction unwinds safely:
     // decoder (its threads use the book) -> book (refers to archive) -> archive.
-    std::unique_ptr<ComicArchive>  archive;
-    std::unique_ptr<Book>          book;
-    std::unique_ptr<DecodeService> decoder;
+    std::unique_ptr<ComicArchive>     archive;
+    std::unique_ptr<Book>             book;
+    std::unique_ptr<DecodeService>    decoder;
+    std::unique_ptr<ThumbnailService> thumbnailer;
 
     QStackedWidget* stack  = nullptr;
     PagedView*      paged  = nullptr;
@@ -40,8 +43,9 @@ struct MainWindow::Impl {
     ChromeController* chrome     = nullptr;
     QToolBar*         toolbar    = nullptr;
     QLabel*           pageLabel  = nullptr;
-    QSlider*          slider     = nullptr;
+    HoverScrubber*    slider     = nullptr;
     QToolButton*      modeButton = nullptr;
+    ScrubberPreview*  preview    = nullptr;
 
     QTimer       saveTimer;
     ProgressData progress;
@@ -72,6 +76,13 @@ MainWindow::MainWindow(std::unique_ptr<ComicArchive> archive,
 
     d->decoder = std::make_unique<DecodeService>(d->book.get(),
                                                  d->config.cacheBudgetBytes);
+    d->decoder->setAutoTrim(d->progress.view.autoTrim);
+
+    // Thumbnail service for the scrubber preview. Modest budget — at ~160px
+    // wide and decoded with QImageReader::setScaledSize, each entry is small
+    // enough to keep many cached.
+    d->thumbnailer = std::make_unique<ThumbnailService>(
+        d->book.get(), /*thumbWidth=*/160, /*cacheBudgetBytes=*/8LL * 1024 * 1024);
 
     // --- views ---
     d->paged = new PagedView;
@@ -101,6 +112,13 @@ MainWindow::MainWindow(std::unique_ptr<ComicArchive> archive,
     buildToolBar();
     connect(d->chrome, &ChromeController::chromeVisibilityChanged,
             d->toolbar, &QToolBar::setVisible);
+    // The preview rides on top of the toolbar — when chrome hides, drop it
+    // too so a stale popup doesn't linger in fullscreen idle.
+    connect(d->chrome, &ChromeController::chromeVisibilityChanged, this,
+            [this](bool visible) {
+                if (!visible)
+                    d->preview->hidePreview();
+            });
 
     for (ReaderView* view : {static_cast<ReaderView*>(d->paged),
                              static_cast<ReaderView*>(d->scroll)}) {
@@ -144,7 +162,7 @@ void MainWindow::buildToolBar()
 
     // The scrubber. It expands to fill the bar, pushing the mode toggle to
     // the right. Inverted for RTL so dragging matches page flow.
-    d->slider = new QSlider(Qt::Horizontal);
+    d->slider = new HoverScrubber;
     d->slider->setRange(0, std::max(0, d->book->pageCount() - 1));
     d->slider->setInvertedAppearance(
         d->progress.view.direction == ReadingDirection::RightToLeft);
@@ -152,6 +170,24 @@ void MainWindow::buildToolBar()
         activeView()->goToPage(value);
     });
     d->toolbar->addWidget(d->slider);
+
+    // Thumbnail preview popup. The HoverScrubber drives show/hide; the
+    // ThumbnailService feeds in late-arriving images.
+    d->preview = new ScrubberPreview(this);
+    connect(d->slider, &HoverScrubber::hoverPage, this,
+            [this](int pageIndex, QPoint anchor) {
+                if (pageIndex < 0 || pageIndex >= d->book->pageCount())
+                    return;
+                QImage cached;
+                d->preview->showForPage(pageIndex, d->book->pageCount(),
+                                        cached,
+                                        d->slider->mapToGlobal(anchor));
+                d->thumbnailer->request(pageIndex);
+            });
+    connect(d->slider, &HoverScrubber::hoverLeft,
+            d->preview, &ScrubberPreview::hidePreview);
+    connect(d->thumbnailer.get(), &ThumbnailService::thumbnailReady,
+            d->preview, &ScrubberPreview::updateThumbnail);
 
     d->modeButton = new QToolButton;
     d->modeButton->setToolButtonStyle(Qt::ToolButtonTextOnly);

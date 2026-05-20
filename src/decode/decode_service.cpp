@@ -7,6 +7,7 @@
 #include <algorithm>
 
 #include "archive/comic_archive.h"
+#include "decode/auto_trim.h"
 #include "model/book.h"
 
 namespace ur {
@@ -63,6 +64,16 @@ void DecodeService::setFocus(int pageIndex, int aheadCount, int behindCount)
     }
 }
 
+void DecodeService::setAutoTrim(bool on)
+{
+    const bool prev = m_autoTrim.exchange(on, std::memory_order_relaxed);
+    if (prev == on)
+        return;
+    // Cached images carry the previous trim state, so toss them; in-flight
+    // decodes will pick up the new flag and arrive trimmed (or not).
+    m_cache.clear();
+}
+
 void DecodeService::enqueueDecode(int pageIndex)
 {
     m_inFlight.insert(pageIndex);
@@ -85,6 +96,10 @@ void DecodeService::enqueueDecode(int pageIndex)
                 error = QStringLiteral("image decode failed: %1")
                             .arg(reader.errorString());
         }
+
+        if (!image.isNull()
+            && m_autoTrim.load(std::memory_order_relaxed))
+            image = autoTrimBorders(image);
 
         // Hop back to the service thread to touch the cache and emit.
         QMetaObject::invokeMethod(this, [this, pageIndex, image, error]() {

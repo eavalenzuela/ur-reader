@@ -8,7 +8,9 @@
 #include <QTextStream>
 
 #include "archive/comic_archive.h"
+#include "core/stratified_sample.h"
 #include "model/book.h"
+#include "model/comic_info.h"
 
 namespace {
 
@@ -80,5 +82,71 @@ int main(int argc, char** argv)
         book.setPageSize(i, QSize(800, 3000));
     out << "detectMode (tall strips): " << modeName(book.detectMode()) << "\n";
 
-    return 0;
+    // --- ComicInfo.xml parsing ----------------------------------------------
+    int failed = 0;
+    const auto check = [&](const char* what, bool ok) {
+        out << "  " << (ok ? "PASS" : "FAIL") << "  " << what << "\n";
+        if (!ok) ++failed;
+    };
+
+    // 1. The bundled sample carries "<Manga>YesAndRightToLeft</Manga>".
+    if (archive->hasComicInfo()) {
+        const auto hints = ur::ComicInfoHints::parse(archive->comicInfoXml());
+        check("comicinfo: bundled sample parses as YesAndRTL",
+              hints.manga == ur::MangaHint::YesAndRTL);
+        const auto dir = hints.readingDirection();
+        check("comicinfo: YesAndRTL implies RightToLeft direction",
+              dir && *dir == ur::ReadingDirection::RightToLeft);
+    }
+
+    // 2. Synthetic XML with a couple of <Page> entries (DoublePage + Type).
+    const QByteArray xml = R"(<?xml version="1.0"?>
+<ComicInfo>
+  <Manga>No</Manga>
+  <Pages>
+    <Page Image="0" Type="FrontCover"/>
+    <Page Image="3" DoublePage="true" Type="Story"/>
+    <Page Image="7" DoublePage="false"/>
+  </Pages>
+</ComicInfo>)";
+    const auto hints = ur::ComicInfoHints::parse(xml);
+    check("comicinfo: Manga=No parsed", hints.manga == ur::MangaHint::No);
+    check("comicinfo: No implies LeftToRight",
+          hints.readingDirection() == ur::ReadingDirection::LeftToRight);
+    check("comicinfo: page 3 marked DoublePage",
+          hints.pages.value(3).doublePage);
+    check("comicinfo: page 7 explicitly not DoublePage",
+          hints.pages.contains(7) && !hints.pages.value(7).doublePage);
+    check("comicinfo: page 0 type captured as FrontCover",
+          hints.pages.value(0).type == QStringLiteral("FrontCover"));
+
+    // 3. Empty / garbage input must not crash and must report empty.
+    check("comicinfo: empty input -> empty hints",
+          ur::ComicInfoHints::parse(QByteArray()).empty());
+    check("comicinfo: malformed XML -> empty hints",
+          ur::ComicInfoHints::parse(QByteArrayLiteral("<<not xml>>")).empty());
+
+    // --- stratified sampler -------------------------------------------------
+    // Edge cases first.
+    check("stratified: total=0 -> empty",
+          ur::stratifiedSample(0, 5).isEmpty());
+    check("stratified: sampleCount=0 -> empty",
+          ur::stratifiedSample(10, 0).isEmpty());
+    check("stratified: total=1 -> {0}",
+          ur::stratifiedSample(1, 4) == QVector<int>{0});
+    // Typical: sampleCount > total -> dedup collapses to {0..total-1}.
+    check("stratified: oversample collapses to full range",
+          ur::stratifiedSample(5, 20) == (QVector<int>{0, 1, 2, 3, 4}));
+    // The endpoints must always be included.
+    {
+        const auto s = ur::stratifiedSample(100, 5);
+        check("stratified: 5 samples across 100 -> first==0 and last==99",
+              !s.isEmpty() && s.first() == 0 && s.last() == 99);
+        check("stratified: 5 samples across 100 -> evenly spread",
+              s == (QVector<int>{0, 24, 49, 74, 99}));
+    }
+
+    out << "model smoke test extras: "
+        << (failed == 0 ? "all passed" : "FAILURES") << "\n";
+    return failed == 0 ? 0 : 1;
 }

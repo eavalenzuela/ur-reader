@@ -24,6 +24,21 @@ ScrollView::ScrollView(QWidget* parent)
     setAlignment(Qt::AlignTop | Qt::AlignHCenter);
     // Scroll mode keeps the identity transform and scales the page items
     // themselves, so scene coordinates equal on-screen pixels.
+
+    m_snapTimer.setSingleShot(true);
+    m_snapTimer.setInterval(120);   // idle-settle window after the last scroll
+    connect(&m_snapTimer, &QTimer::timeout, this, &ScrollView::settleSnap);
+}
+
+void ScrollView::setSnap(bool on)
+{
+    if (m_snap == on)
+        return;
+    m_snap = on;
+    if (m_snap)
+        m_snapTimer.start();        // settle to the nearest page right away
+    else
+        m_snapTimer.stop();
 }
 
 qreal ScrollView::displayWidth() const
@@ -121,6 +136,32 @@ void ScrollView::scrollContentsBy(int dx, int dy)
 {
     ReaderView::scrollContentsBy(dx, dy);
     emit pageChanged(currentPage());
+    // Restart the settle timer on every scroll so we only snap when the user
+    // (or a programmatic jump) actually stops moving the viewport.
+    if (m_snap && !m_suppressSnap)
+        m_snapTimer.start();
+}
+
+void ScrollView::settleSnap()
+{
+    if (!m_snap || m_top.isEmpty())
+        return;
+    const qreal topY = mapToScene(0, 0).y();
+    int   best = 0;
+    qreal bestDist = std::abs(m_top[0] - topY);
+    for (int i = 1; i < m_top.size(); ++i) {
+        const qreal d = std::abs(m_top[i] - topY);
+        if (d < bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    if (bestDist < 1.0)
+        return;                       // already aligned, nothing to do
+    m_suppressSnap = true;            // don't re-arm from our own scroll
+    centerOn(displayWidth() / 2.0,
+             m_top[best] + viewport()->height() / 2.0);
+    m_suppressSnap = false;
 }
 
 void ScrollView::mousePressEvent(QMouseEvent* event)

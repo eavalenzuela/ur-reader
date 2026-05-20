@@ -4,7 +4,10 @@
 #include <archive_entry.h>
 
 #include <QFileInfo>
+#include <QHash>
 #include <QLatin1String>
+#include <QMutex>
+#include <QMutexLocker>
 #include <algorithm>
 
 #include "core/natural_sort.h"
@@ -45,8 +48,9 @@ QString entryName(struct archive_entry* entry)
     return {};
 }
 
-// Opens a libarchive read handle for a cbz/cbr file. Caller frees it with
-// archive_read_free. Returns nullptr if the file is not a supported archive.
+// Opens a libarchive read handle for a comic archive. Caller frees it with
+// archive_read_free. Format is detected from content, not the extension —
+// any cbz/cbr/cb7/cbt that libarchive can identify will open.
 struct archive* openHandle(const QString& path)
 {
     struct archive* a = archive_read_new();
@@ -55,6 +59,8 @@ struct archive* openHandle(const QString& path)
     archive_read_support_format_zip(a);    // cbz
     archive_read_support_format_rar(a);    // cbr (RAR4)
     archive_read_support_format_rar5(a);   // cbr (RAR5)
+    archive_read_support_format_7zip(a);   // cb7
+    archive_read_support_format_tar(a);    // cbt
     archive_read_support_filter_all(a);
     if (archive_read_open_filename(
             a, path.toLocal8Bit().constData(), kBlockSize) != ARCHIVE_OK) {
@@ -92,10 +98,31 @@ struct ComicArchive::Impl {
     QVector<ArchiveEntry> entries;     // natural-sorted images
     QByteArray            comicInfo;   // raw ComicInfo.xml, if present
     bool                  hasInfo = false;
+
+    // Forward-advancing cursor over the archive in its stored (physical)
+    // order. Holds the libarchive read handle between calls so an ascending
+    // sequence of readEntry() calls walks through the archive once instead
+    // of re-opening each time. All access serialised by `cursorMutex`.
+    QMutex                cursorMutex;
+    struct archive*       cursor        = nullptr;
+    int                   cursorPhysical = -1;   // -1 = positioned before any kept entry
+    QHash<QString, int>   physicalByName;        // entry name -> physical rank
+
+    void closeCursor()
+    {
+        if (cursor) {
+            archive_read_free(cursor);
+            cursor = nullptr;
+        }
+        cursorPhysical = -1;
+    }
 };
 
 ComicArchive::ComicArchive() : d(std::make_unique<Impl>()) {}
-ComicArchive::~ComicArchive() = default;
+ComicArchive::~ComicArchive()
+{
+    d->closeCursor();
+}
 
 std::unique_ptr<ComicArchive> ComicArchive::open(const QString& path, QString* error)
 {
@@ -117,6 +144,7 @@ std::unique_ptr<ComicArchive> ComicArchive::open(const QString& path, QString* e
     self->d->path = path;
 
     QVector<ArchiveEntry> images;
+    int physicalCounter = 0;          // rank among image entries in archive order
     struct archive_entry* entry = nullptr;
     for (;;) {
         const int r = archive_read_next_header(a, &entry);
@@ -138,6 +166,7 @@ std::unique_ptr<ComicArchive> ComicArchive::open(const QString& path, QString* e
             ArchiveEntry e;
             e.name = name;
             e.size = archive_entry_size_is_set(entry) ? archive_entry_size(entry) : 0;
+            e.physical = physicalCounter++;
             images.append(e);
         }
         // Any other member type is ignored.
@@ -146,6 +175,12 @@ std::unique_ptr<ComicArchive> ComicArchive::open(const QString& path, QString* e
 
     if (images.isEmpty())
         return fail(QStringLiteral("No image pages found in archive: %1").arg(path));
+
+    // Build the name -> physical-rank lookup before sorting, while we still
+    // have one entry per name.
+    self->d->physicalByName.reserve(images.size());
+    for (const auto& e : images)
+        self->d->physicalByName.insert(e.name, e.physical);
 
     std::sort(images.begin(), images.end(),
               [](const ArchiveEntry& x, const ArchiveEntry& y) {
@@ -189,35 +224,51 @@ QByteArray ComicArchive::readEntry(int index, QString* error)
     if (index < 0 || index >= d->entries.size())
         return fail(QStringLiteral("Page index out of range: %1").arg(index));
 
-    const QString wanted = d->entries.at(index).name;
+    const ArchiveEntry want = d->entries.at(index);
 
-    // TODO(perf): re-opens and scans from the start on every call. For RAR
-    // this is O(n) per page. A future sequential read cursor (keyed on the
-    // archive's physical entry order) can make ascending prefetch cheap.
-    struct archive* a = openHandle(d->path);
-    if (!a)
-        return fail(QStringLiteral("Could not reopen archive: %1").arg(d->path));
+    QMutexLocker locker(&d->cursorMutex);
 
-    QByteArray data;
-    bool found = false;
+    // If the target is at or behind where the cursor is currently parked, we
+    // can't seek backward in a libarchive stream — re-open. Otherwise advance
+    // the existing cursor forward, which is what makes ascending prefetch
+    // O(n) total instead of O(n^2).
+    if (!d->cursor || d->cursorPhysical >= want.physical) {
+        d->closeCursor();
+        d->cursor = openHandle(d->path);
+        if (!d->cursor)
+            return fail(QStringLiteral("Could not reopen archive: %1").arg(d->path));
+    }
+
     struct archive_entry* entry = nullptr;
     for (;;) {
-        const int r = archive_read_next_header(a, &entry);
+        const int r = archive_read_next_header(d->cursor, &entry);
         if (r == ARCHIVE_EOF)
             break;
-        if (r < ARCHIVE_WARN)
-            break;
-        if (entryName(entry) == wanted) {
-            data = readCurrentData(a, archive_entry_size(entry));
-            found = true;
-            break;
+        if (r < ARCHIVE_WARN) {
+            const QString msg = QString::fromUtf8(archive_error_string(d->cursor));
+            d->closeCursor();
+            return fail(QStringLiteral("Read failed: %1").arg(msg));
         }
-    }
-    archive_read_free(a);
+        if (archive_entry_filetype(entry) != AE_IFREG)
+            continue;
 
-    if (!found)
-        return fail(QStringLiteral("Entry not found in archive: %1").arg(wanted));
-    return data;
+        const QString name = entryName(entry);
+        const auto it = d->physicalByName.constFind(name);
+        if (it == d->physicalByName.constEnd())
+            continue;                 // not one of our image entries
+        d->cursorPhysical = it.value();
+        if (name == want.name) {
+            QByteArray data = readCurrentData(d->cursor, archive_entry_size(entry));
+            // Cursor stays parked on this entry; the next ascending request
+            // will resume from archive_read_next_header.
+            return data;
+        }
+        // Otherwise let archive_read_next_header skip past unread data.
+    }
+
+    // Walked off the end without finding it — the archive may be malformed.
+    d->closeCursor();
+    return fail(QStringLiteral("Entry not found in archive: %1").arg(want.name));
 }
 
 } // namespace ur

@@ -9,14 +9,15 @@ namespace ur {
 
 // One file inside the archive.
 struct ArchiveEntry {
-    int     index = -1;   // position in the filtered, natural-sorted list
-    QString name;         // path within the archive
-    qint64  size = 0;     // uncompressed size in bytes
+    int     index = -1;      // position in the filtered, natural-sorted list
+    int     physical = -1;   // rank among kept entries in archive's stored order
+    QString name;            // path within the archive
+    qint64  size = 0;        // uncompressed size in bytes
 };
 
-// Read-only access to a comic archive. v1 accepts cbz (Zip) and cbr (RAR4 /
-// RAR5); cb7 (7z) and cbt (Tar) are deferred post-v1 — libarchive handles
-// them through the same API, so adding them is an extension allow-list change.
+// Read-only access to a comic archive. Accepts cbz (Zip), cbr (RAR4/RAR5),
+// cb7 (7z), and cbt (Tar). Format is detected by libarchive from file
+// content, not the filename, so a mis-extensioned archive still opens.
 // Wraps libarchive. Pure C++ — no Qt GUI, not a QObject.
 //
 // NOTE: cbr (RAR) is a sequential-access format; extracting entry N may
@@ -40,9 +41,13 @@ public:
     bool       hasComicInfo() const;
     QByteArray comicInfoXml() const;   // raw, unparsed; empty if absent
 
-    // Extracts the raw decompressed bytes of one entry. Concurrent-safe: each
-    // call uses an independent archive handle and reads only immutable state,
-    // so callers may decode pages from multiple threads without locking.
+    // Extracts the raw decompressed bytes of one entry. Internally keeps a
+    // single forward-advancing libarchive cursor protected by a mutex: an
+    // ascending sequence of reads only opens the archive once and walks
+    // through it in order, which is the fast path for RAR (a sequential-
+    // access format). A request behind the cursor re-opens the archive and
+    // walks from the start. Concurrent calls are serialised; decode workers
+    // can still run the image-decode step in parallel.
     QByteArray readEntry(int index, QString* error);
 
     ~ComicArchive();

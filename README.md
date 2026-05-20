@@ -1,6 +1,6 @@
 # ur-reader
 
-A focused desktop manga reader for CBR/CBZ archives.
+A focused desktop manga reader for CBZ / CBR / CB7 / CBT archives.
 
 Most comic readers try to be too many things at once, or ship a pile of
 toggles while getting the defaults and interactions wrong. ur-reader does one
@@ -11,7 +11,8 @@ drive (see [DESIGN.md](DESIGN.md)).
 
 ## Features
 
-- **Formats** — CBZ (Zip) and CBR (RAR4/RAR5), via `libarchive`
+- **Formats** — CBZ (Zip), CBR (RAR4/RAR5), CB7 (7z), and CBT (Tar), via
+  `libarchive`; format is detected by content, not extension
 - **Paged reading** — single page and double-page spreads, with automatic
   wide-spread detection and per-page overrides
 - **Continuous scroll** — vertical webtoon-style reading
@@ -19,8 +20,13 @@ drive (see [DESIGN.md](DESIGN.md)).
 - **Fit modes** — width, height, whole-page, original, and smart
 - **Threaded decode** — background image decoding with a memory-budgeted
   LRU cache and prefetch
+- **Scrubber thumbnail preview** — hovering or dragging the page slider pops
+  a small preview of the page under the cursor
 - **Resume support** — per-book progress (page, view settings, spread
   overrides) persisted to an atomic JSON file, keyed by a partial-hash book id
+- **ComicInfo.xml hints** — `<Manga>` value sets reading direction; per-page
+  `DoublePage="true"` becomes a spread override (both lower-priority than the
+  user's saved choices)
 - **Scriptable** — CLI launch arguments in, progress file out; no library
   required
 

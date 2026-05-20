@@ -19,6 +19,7 @@ pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
 # --- core: shared utilities, zero project dependencies -----------------------
 add_library(ur-core STATIC
     src/core/natural_sort.cpp
+    src/core/stratified_sample.cpp
 )
 target_include_directories(ur-core PUBLIC src)
 target_link_libraries(ur-core PUBLIC Qt6::Core)
@@ -36,13 +37,16 @@ target_link_libraries(ur-archive
 add_library(ur-model STATIC
     src/model/page.cpp
     src/model/book.cpp
+    src/model/comic_info.cpp
 )
 target_link_libraries(ur-model PUBLIC ur-archive)
 
 # --- decode: threaded image decode + memory-budgeted LRU cache ---------------
 add_library(ur-decode STATIC
     src/decode/page_cache.cpp
+    src/decode/auto_trim.cpp
     src/decode/decode_service.cpp
+    src/decode/thumbnail_service.cpp
 )
 target_link_libraries(ur-decode PUBLIC ur-model Qt6::Gui)
 
@@ -67,6 +71,8 @@ add_library(ur-app STATIC
     src/app/cli_options.cpp
     src/app/mode_resolver.cpp
     src/app/chrome_controller.cpp
+    src/app/hover_scrubber.cpp
+    src/app/scrubber_preview.cpp
     src/app/main_window.cpp
 )
 target_link_libraries(ur-app PUBLIC ur-view ur-session)

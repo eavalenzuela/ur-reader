@@ -5,6 +5,7 @@
 #include <QString>
 #include <QThreadPool>
 #include <QSet>
+#include <atomic>
 #include "decode/page_cache.h"
 
 namespace ur {
@@ -30,6 +31,12 @@ public:
     // neighbouring pages in reading order and lets the cache evict the rest.
     void setFocus(int pageIndex, int aheadCount, int behindCount);
 
+    // Toggles auto-trim of uniform border whitespace on decoded pages.
+    // Atomic so worker threads read the latest value; flipping clears the
+    // cache because cached images carry the previous trim state.
+    void setAutoTrim(bool on);
+    bool autoTrim() const { return m_autoTrim.load(std::memory_order_relaxed); }
+
 signals:
     void pageReady(int pageIndex, QImage image);
     void pageFailed(int pageIndex, QString error);
@@ -42,10 +49,11 @@ private:
     // updates the cache, feeds the size back to the Book, emits the result.
     void deliver(int pageIndex, QImage image, QString error);
 
-    Book*       m_book;
-    PageCache   m_cache;        // touched only on the service thread
-    QThreadPool m_pool;         // background decode workers
-    QSet<int>   m_inFlight;     // pages currently being decoded
+    Book*             m_book;
+    PageCache         m_cache;        // touched only on the service thread
+    QThreadPool       m_pool;         // background decode workers
+    QSet<int>         m_inFlight;     // pages currently being decoded
+    std::atomic<bool> m_autoTrim{false};
 };
 
 } // namespace ur

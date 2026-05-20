@@ -15,6 +15,7 @@
 #include <QApplication>
 #include <QEventLoop>
 #include <QImage>
+#include <QScrollBar>
 #include <QTextStream>
 #include <QTimer>
 #include <cstdlib>
@@ -154,6 +155,44 @@ int main(int argc, char** argv)
         check("scroll: goToPage(2) -> currentPage() == 2", scroll.currentPage() == 2);
         check("scroll: page 2 shows page2 (red)", nearColour(c, 180, 40, 40));
     }
+
+    // --- snap-to-page (scroll mode) -----------------------------------------
+    // Free-scroll baseline: nudge the viewport off a boundary and confirm it
+    // stays put (no snap should fire when snap is off).
+    scroll.goToPage(1);
+    pump(200);
+    {
+        QScrollBar* bar = scroll.verticalScrollBar();
+        const int baseline = bar->value();
+        bar->setValue(baseline + 50);
+        pump(250);
+        check("scroll: free-scroll keeps off-boundary offset",
+              std::abs(bar->value() - (baseline + 50)) < 5);
+    }
+
+    // Snap on: same nudge should settle back to the nearest page top.
+    scroll.setSnap(true);
+    scroll.goToPage(1);
+    pump(250);                                  // let the settle timer fire
+    {
+        QScrollBar* bar = scroll.verticalScrollBar();
+        const int boundary = bar->value();
+        bar->setValue(boundary + 60);           // small nudge off the boundary
+        pump(250);
+        check("scroll: snap pulls small nudge back to page boundary",
+              std::abs(bar->value() - boundary) < 5);
+    }
+    // A larger nudge past the midpoint should snap forward to the next page,
+    // not backward — verifies we pick *nearest*, not always *previous*.
+    {
+        QScrollBar* bar = scroll.verticalScrollBar();
+        const int before = bar->value();
+        bar->setValue(before + 700);            // ~most of a page down (pages are 1200px tall)
+        pump(250);
+        check("scroll: snap goes forward when nudge crosses the midpoint",
+              bar->value() > before + 300);
+    }
+    scroll.setSnap(false);
 
     out << "view smoke test: " << passed << " passed, " << failed << " failed\n";
     return failed == 0 ? 0 : 1;

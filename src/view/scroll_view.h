@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QGraphicsScene>
+#include <QTimer>
 #include <QVector>
 
 #include "view/reader_view.h"
@@ -25,7 +26,7 @@ public:
     void goToPage(int pageIndex) override;
     int  currentPage() const override;          // top-most visible page
 
-    void setSnap(bool on) { m_snap = on; }       // free-scroll default
+    void setSnap(bool on);                        // free-scroll default
 
 protected:
     void mousePressEvent(QMouseEvent*) override; // left/right = page up/down
@@ -39,6 +40,7 @@ private slots:
 private:
     void  rebuildLayout();           // recompute item scales and y-positions
     void  refreshVisibleWindow();    // prefetch around the viewport
+    void  settleSnap();              // align to nearest page top when idle
     qreal displayWidth() const;
 
     Book*          m_book = nullptr;
@@ -48,6 +50,8 @@ private:
     QVector<QGraphicsPixmapItem*> m_items;   // one per page
     QVector<qreal>                m_top;     // scene-y of each page's top
     bool                          m_snap = false;
+    QTimer                        m_snapTimer;
+    bool                          m_suppressSnap = false;   // re-entry guard
 };
 
 } // namespace ur

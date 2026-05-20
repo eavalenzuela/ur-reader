@@ -16,7 +16,7 @@ later, independently) launches the reader and consumes the progress it writes.
 ## Scope
 
 **In scope (v1)**
-- Open CBZ (Zip) and CBR (RAR4 / RAR5) archives.
+- Open CBZ (Zip), CBR (RAR4 / RAR5), CB7 (7z), and CBT (Tar) archives.
 - Paged reading: single page and double-page spread.
 - Continuous vertical scroll (webtoon) reading.
 - RTL and LTR reading direction.
@@ -28,9 +28,6 @@ later, independently) launches the reader and consumes the progress it writes.
 
 **Out of scope (v1)**
 - Library / catalog / metadata browser (separate app).
-- CB7 (7z) and CBT (Tar) — deferred post-v1; `libarchive` handles them via
-  the same API, so adding them is just an extension allow-list change.
-- Parsing / acting on `ComicInfo.xml` — see "ComicInfo.xml" below.
 - Page rotation, color adjustment, configurable downscale filter.
 - Network features, online sources, downloading.
 
@@ -78,9 +75,9 @@ not link Qt GUI.
 ### Technology
 
 - **Language/UI**: C++ / Qt.
-- **Archives**: `libarchive` — single dependency. v1 reads cbz (Zip) and cbr
-  (RAR4/RAR5; RAR5 read support since libarchive 3.2.0). The same API covers
-  cb7/cbt when those are enabled post-v1.
+- **Archives**: `libarchive` — single dependency. Reads cbz (Zip), cbr
+  (RAR4/RAR5; RAR5 read support since libarchive 3.2.0), cb7 (7z), and cbt
+  (Tar). Format is detected from file content, not the extension.
 - **Paged rendering**: `QGraphicsView` + `QGraphicsScene` — smooth zoom/pan,
   fit modes, and double-page layout (two `QGraphicsPixmapItem`s).
 - **Scroll rendering**: QML `ListView`/`Flickable` with delegate recycling, or
@@ -143,7 +140,9 @@ force-pair); overrides persist in the progress file.
   - `F` = toggle fullscreen. `Esc` = exit fullscreen.
   - `D` = toggle double-page. `M` = toggle reading mode.
 - **Scrubber**: a page slider in the chrome; runs right-to-left in RTL so
-  dragging matches page flow. Thumbnail preview on hover/drag.
+  dragging matches page flow. A thumbnail preview pops above the cursor on
+  hover and during drag, fed by an independent `ThumbnailService` (small LRU
+  cache, single-threaded so it never starves the main decoder).
 - **End-of-book**: "next" past the last page shows a subtle end-of-book
   affordance rather than silently doing nothing. (Future hook: the library can
   use this for "next chapter.")
@@ -315,16 +314,21 @@ toolkit, shared zoom/pan and 2-zone click logic (no QML).
 ```
 src/
   core/      types.h natural_sort.h          shared enums + utilities, no deps
+             stratified_sample.h
   archive/   comic_archive.h                 libarchive wrapper, no GUI
-  model/     page.h book.h                   page list, detection, no GUI
-  decode/    decoded_image.h page_cache.h    async decode + LRU cache
-             decode_service.h
+  model/     page.h book.h comic_info.h      page list, detection, ComicInfo
+                                             parsing — no GUI
+  decode/    decoded_image.h page_cache.h    async decode + LRU cache, with
+             decode_service.h auto_trim.h    optional border auto-trim;
+             thumbnail_service.h             secondary low-res decode path
   view/      reader_view.h                   QGraphicsView base
              paged_view.h scroll_view.h      the two reading widgets
   session/   book_identity.h progress_file.h partial-hash id, progress JSON,
              app_config.h                    global config
   app/       cli_options.h mode_resolver.h   arg parsing, mode precedence,
              chrome_controller.h             chrome visibility policy,
+             hover_scrubber.h                hover-aware slider widget,
+             scrubber_preview.h              floating thumbnail popup,
              main_window.h main.cpp          top-level window + entry point
 CMakeLists.txt                               Qt6 Widgets + libarchive
 ```
@@ -345,20 +349,33 @@ No library, no metadata browser. A complete, genuinely useful tool on its own.
 
 ## ComicInfo.xml
 
-The archive layer **detects** a `ComicInfo.xml` member and stashes its raw
-bytes (`ComicArchive::hasComicInfo` / `comicInfoXml`), but v1 does **not**
-parse or act on it — reading direction and spread treatment come purely from
-aspect-ratio heuristics and user/CLI input. Stashing it now means a future
-library or metadata layer can consume it (the `Manga` RTL hint, per-page
-`Type`/`DoublePage` attributes) with no change to the reader.
+The archive layer detects a `ComicInfo.xml` member and stashes its raw bytes
+(`ComicArchive::hasComicInfo` / `comicInfoXml`). The model layer parses it
+into `ComicInfoHints` (`Manga` value plus per-page `DoublePage` / `Type`)
+on a best-effort basis — malformed metadata never blocks reading.
+
+Hints feed into the reader's resolution chain at a **lower priority than CLI
+or saved progress**:
+
+- The `<Manga>` value gives a direction hint: `YesAndRightToLeft` → RTL,
+  `No` → LTR. Plain `Yes` is ambiguous about direction (manhwa can be LTR)
+  and is treated as no hint. Applied only when neither CLI nor saved
+  progress sets a direction.
+- Per-page `DoublePage="true"` becomes a `ForcePair` spread override on
+  the corresponding `Book::Page`, applied only when the user has not
+  already saved an override for that page.
+
+`Type` (`FrontCover`, `Story`, `Advertisement`, ...) is captured in
+`ComicInfoHints::pages` but currently has no behavior wired to it.
 
 ## Resolved decisions
 
-- **Archive formats**: v1 = CBZ + CBR only; CB7/CBT deferred (zero-cost to add
-  later via `libarchive`).
+- **Archive formats**: CBZ, CBR, CB7, CBT — all via `libarchive`, all
+  content-detected (extension is informational).
 - **RAR coverage**: `libarchive` reads RAR4 and RAR5; no second archive
   library needed.
-- **ComicInfo.xml**: detect and stash only; no parsing in v1 (see above).
+- **ComicInfo.xml**: parsed into structured hints, fed into direction and
+  spread resolution at lower priority than CLI / saved progress (see above).
 
 ## Status
 
@@ -369,12 +386,6 @@ running headless via `QT_QPA_PLATFORM=offscreen`. `build/ur-reader
 
 Build: `cmake -S . -B build && cmake --build build` (needs Qt6 + libarchive).
 
-Known v1 simplifications, left for later:
-
-- `auto_trim` and `ComicInfo.xml` parsing are persisted/stashed but not yet
-  acted on.
-- The scrubber has no thumbnail-preview-on-hover.
-- Scroll-mode `snap` is stored but not yet enforced (free-scroll only).
-- `ComicArchive::readEntry` re-opens the archive per call; a sequential-read
-  cursor would speed up RAR.
-- Startup mode auto-detection probes only the first 10 page headers.
+v1 is complete; the design simplifications list is empty. Remaining items are
+either deliberately out-of-scope features (page rotation, color adjustment,
+network) or live in a separate library / catalog app.

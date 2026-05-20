@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <cstdlib>
 
+#include "app/hover_scrubber.h"
 #include "app/main_window.h"
 #include "archive/comic_archive.h"
 #include "model/book.h"
@@ -94,6 +95,25 @@ int main(int argc, char** argv)
         const QRgb c = img.pixel(img.width() / 2, img.height() * 2 / 3);
         check("setMode(Scroll) keeps page 0 cover (blue)",
               nearColour(c, 40, 60, 120));
+    }
+
+    // --- HoverScrubber pageAtX ----------------------------------------------
+    // Set up a 5-page slider 400 px wide; verify the endpoints and a couple
+    // of midpoints, and confirm RTL inversion flips the mapping.
+    {
+        ur::HoverScrubber s;
+        s.resize(400, 24);
+        s.setRange(0, 4);
+
+        s.setInvertedAppearance(false);
+        check("scrubber: LTR x=0 -> page 0", s.pageAtX(0) == 0);
+        check("scrubber: LTR x=400 -> page 4", s.pageAtX(400) == 4);
+        const int midLtr = s.pageAtX(200);
+        check("scrubber: LTR mid is page 2", midLtr == 2);
+
+        s.setInvertedAppearance(true);
+        check("scrubber: RTL x=0 -> page 4", s.pageAtX(0) == 4);
+        check("scrubber: RTL x=400 -> page 0", s.pageAtX(400) == 0);
     }
 
     out << "app smoke test: " << passed << " passed, " << failed << " failed\n";
